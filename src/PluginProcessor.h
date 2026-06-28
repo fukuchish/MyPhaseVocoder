@@ -4,7 +4,7 @@
 #include <array>
 
 // ==============================================================================
-// FFT クロスシンセシス・ボコーダー (サイドチェイン入力仕様)
+// FFT クロスシンセシス・ボコーダー (フォルマント＆シビランス追加版)
 // ==============================================================================
 class MyPhaseVocoderAudioProcessor : public juce::AudioProcessor
 {
@@ -31,8 +31,8 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    void getStateInformation(juce::MemoryBlock&) override {}
-    void setStateInformation(const void*, int) override {}
+    void getStateInformation(juce::MemoryBlock&) override;
+    void setStateInformation(const void*, int) override;
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -47,7 +47,6 @@ private:
     juce::dsp::FFT fft;
     juce::dsp::WindowingFunction<float> window;
 
-    // モジュレーター（声）とキャリア（シンセ）の両方を記録する構造体
     struct ChannelData {
         std::vector<float> modCircularBuffer;
         std::vector<float> carCircularBuffer;
@@ -58,8 +57,13 @@ private:
         
         std::vector<float> olaBuffer;
 
+        // ★新規追加: フォルマント計算用の作業バッファ
+        std::vector<float> tempModMag;
+        std::vector<float> shiftedModMag;
+
         int writePointer = 0;
         int olaReadPointer = 0;
+        int olaWritePointer = 0;
     };
 
     std::array<ChannelData, 2> channelData;

@@ -3,7 +3,6 @@
 
 // ==============================================================================
 MyPhaseVocoderAudioProcessor::MyPhaseVocoderAudioProcessor()
-    // DAWに2つの入力を要求する（サイドチェイン用）
     : AudioProcessor(BusesProperties()
           .withInput("Voice (Modulator)", juce::AudioChannelSet::stereo(), true)
           .withInput("Synth (Carrier)",   juce::AudioChannelSet::stereo(), true)
@@ -16,11 +15,15 @@ MyPhaseVocoderAudioProcessor::MyPhaseVocoderAudioProcessor()
 
 MyPhaseVocoderAudioProcessor::~MyPhaseVocoderAudioProcessor() {}
 
-// 今回は純粋なボコーダーにするため、パラメータはMixとGainのみ
 juce::AudioProcessorValueTreeState::ParameterLayout MyPhaseVocoderAudioProcessor::createParameters()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
-    layout.add(std::make_unique<juce::AudioParameterFloat>("mix", "Mix (%)", 0.0f, 100.0f, 100.0f));
+    
+    // ★新規追加: フォルマントシフト（-12〜+12半音）とシビランス（0〜100%）
+    layout.add(std::make_unique<juce::AudioParameterFloat>("formant", "Formant Shift (st)", -12.0f, 12.0f, 0.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>("sibilance", "Sibilance (%)", 0.0f, 100.0f, 50.0f));
+    
+    layout.add(std::make_unique<juce::AudioParameterFloat>("mix", "Mix (%)", 0.0f, 100.0f, 50.0f));
     layout.add(std::make_unique<juce::AudioParameterFloat>("gain", "Gain", -60.0f, 12.0f, 0.0f));
     return layout;
 }
@@ -28,7 +31,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout MyPhaseVocoderAudioProcessor
 bool MyPhaseVocoderAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono() && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
-    if (layouts.getMainInputChannelSet() != juce::AudioChannelSet::mono() && layouts.getMainInputChannelSet() != juce::AudioChannelSet::stereo()) return false;
     return true;
 }
 
@@ -36,6 +38,8 @@ void MyPhaseVocoderAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 {
     juce::ignoreUnused(sampleRate, samplesPerBlock);
     
+    int numBins = fftSize / 2 + 1;
+
     for (auto& ch : channelData)
     {
         ch.modCircularBuffer.assign(fftSize, 0.0f);
@@ -46,8 +50,14 @@ void MyPhaseVocoderAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         ch.outFftBuffer.assign(fftSize * 2, 0.0f);
         
         ch.olaBuffer.assign(fftSize, 0.0f);
+        
+        // ★新規追加: バッファの初期化
+        ch.tempModMag.assign(numBins, 0.0f);
+        ch.shiftedModMag.assign(numBins, 0.0f);
+        
         ch.writePointer = 0;
         ch.olaReadPointer = 0;
+        ch.olaWritePointer = 0;
     }
     hopCounter = 0;
 }
@@ -59,19 +69,30 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     juce::ScopedNoDenormals noDenormals;
     juce::ignoreUnused(midiMessages);
 
+    // パラメータ取得
     float gainLinear = juce::Decibels::decibelsToGain(apvts.getRawParameterValue("gain")->load());
     float mixWet = apvts.getRawParameterValue("mix")->load() * 0.01f;
     float mixDry = 1.0f - mixWet;
+    
+    float formantSemitones = apvts.getRawParameterValue("formant")->load();
+    float formantRatio = std::pow(2.0f, formantSemitones / 12.0f);
+    float sibilanceVal = apvts.getRawParameterValue("sibilance")->load() * 0.01f;
 
-    // 2つのバス（VoiceとSynth）からオーディオを取得
-    auto modBus = getBusBuffer(buffer, true, 0); 
-    auto carBus = getBusBuffer(buffer, true, 1); 
+    juce::AudioBuffer<float> modBus;
+    juce::AudioBuffer<float> carBus;
+    if (getBusCount(true) > 0) modBus = getBusBuffer(buffer, true, 0);
+    if (getBusCount(true) > 1) carBus = getBusBuffer(buffer, true, 1);
 
     int numOutChannels = buffer.getNumChannels();
     int numBins = fftSize / 2 + 1;
 
     juce::AudioBuffer<float> dryBuffer;
-    dryBuffer.makeCopyOf(modBus);
+    if (modBus.getNumChannels() > 0) {
+        dryBuffer.makeCopyOf(modBus);
+    } else {
+        dryBuffer.setSize(buffer.getNumChannels(), buffer.getNumSamples());
+        dryBuffer.clear();
+    }
 
     for (int s = 0; s < buffer.getNumSamples(); ++s)
     {
@@ -79,20 +100,16 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
         {
             auto& chData = channelData[ch];
             
-            // モジュレーターとキャリアそれぞれのサンプルを取得
             float modSample = (modBus.getNumChannels() > ch) ? modBus.getReadPointer(ch)[s] : 0.0f;
             float carSample = (carBus.getNumChannels() > ch) ? carBus.getReadPointer(ch)[s] : 0.0f;
 
             chData.modCircularBuffer[chData.writePointer] = modSample;
             chData.carCircularBuffer[chData.writePointer] = carSample;
-            
             chData.writePointer = (chData.writePointer + 1) % fftSize;
 
-            float outputSample = chData.olaBuffer[chData.olaReadPointer];
+            buffer.getWritePointer(ch)[s] = chData.olaBuffer[chData.olaReadPointer];
             chData.olaBuffer[chData.olaReadPointer] = 0.0f; 
             chData.olaReadPointer = (chData.olaReadPointer + 1) % fftSize;
-
-            buffer.getWritePointer(ch)[s] = outputSample;
         }
 
         hopCounter++;
@@ -108,8 +125,10 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
                     chData.modFftBuffer[i] = chData.modCircularBuffer[(chData.writePointer + i) % fftSize];
                     chData.carFftBuffer[i] = chData.carCircularBuffer[(chData.writePointer + i) % fftSize];
                 }
+                
                 std::fill(chData.modFftBuffer.begin() + fftSize, chData.modFftBuffer.end(), 0.0f);
                 std::fill(chData.carFftBuffer.begin() + fftSize, chData.carFftBuffer.end(), 0.0f);
+                std::fill(chData.outFftBuffer.begin(), chData.outFftBuffer.end(), 0.0f);
 
                 window.multiplyWithWindowingTable(chData.modFftBuffer.data(), fftSize);
                 window.multiplyWithWindowingTable(chData.carFftBuffer.data(), fftSize);
@@ -117,49 +136,100 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
                 fft.performRealOnlyForwardTransform(chData.modFftBuffer.data());
                 fft.performRealOnlyForwardTransform(chData.carFftBuffer.data());
 
-                // 【クロスシンセシス (Cross-Synthesis)】
-                for (int k = 0; k < numBins; ++k)
-                {
-                    // モジュレーター（声）の振幅
+                // --------------------------------------------------------------
+                // 1. モジュレーターの振幅（エンベロープ）を抽出
+                // --------------------------------------------------------------
+                for (int k = 0; k < numBins; ++k) {
                     float mR = chData.modFftBuffer[2 * k];
                     float mI = chData.modFftBuffer[2 * k + 1];
-                    float modMag = std::sqrt(mR * mR + mI * mI);
+                    chData.tempModMag[k] = std::sqrt(mR * mR + mI * mI);
+                }
 
-                    // キャリア（シンセ）の振幅と位相
+                // --------------------------------------------------------------
+                // 2. フォルマント・シフト（振幅配列の伸縮）
+                // --------------------------------------------------------------
+                for (int k = 0; k < numBins; ++k) {
+                    float srcK = k / formantRatio;
+                    int idx = static_cast<int>(srcK);
+                    float frac = srcK - idx;
+
+                    // 線形補間（Linear Interpolation）で滑らかにピッチをズラす
+                    if (idx >= 0 && idx < numBins - 1) {
+                        chData.shiftedModMag[k] = chData.tempModMag[idx] * (1.0f - frac) + chData.tempModMag[idx + 1] * frac;
+                    } else {
+                        chData.shiftedModMag[k] = 0.0f; // 範囲外はゼロ
+                    }
+                }
+
+                // --------------------------------------------------------------
+                // 3. クロスシンセシス ＆ シビランス・エンハンサー
+                // --------------------------------------------------------------
+                for (int k = 0; k < numBins; ++k)
+                {
                     float cR = chData.carFftBuffer[2 * k];
                     float cI = chData.carFftBuffer[2 * k + 1];
                     float carMag = std::sqrt(cR * cR + cI * cI);
                     float carPhase = std::atan2(cI, cR);
 
-                    // 振幅の掛け合わせ（スケーリング係数 0.02f は適宜調整）
-                    float outMag = (modMag * carMag) * 0.02f;
+                    // フォルマントシフトされた声と、シンセの音量を掛け合わせる
+                    float outMag = (chData.shiftedModMag[k] * carMag) * 0.02f;
+                    float outR = outMag * std::cos(carPhase);
+                    float outI = outMag * std::sin(carPhase);
 
-                    // キャリアの位相を使って再構築
-                    chData.outFftBuffer[2 * k]     = outMag * std::cos(carPhase);
-                    chData.outFftBuffer[2 * k + 1] = outMag * std::sin(carPhase);
+                    // 【シビランス・エンハンサー】
+                    // bin 185付近 (約4000Hz) 以上から、元の声の高域成分を混ぜ合わせる
+                    float sibWeight = 0.0f;
+                    if (k > 185) {
+                        sibWeight = std::min(1.0f, (k - 185) / 50.0f) * sibilanceVal;
+                    }
+                    
+                    if (sibWeight > 0.0f) {
+                        float originalMR = chData.modFftBuffer[2 * k];
+                        float originalMI = chData.modFftBuffer[2 * k + 1];
+                        outR = outR * (1.0f - sibWeight) + originalMR * sibWeight;
+                        outI = outI * (1.0f - sibWeight) + originalMI * sibWeight;
+                    }
+
+                    chData.outFftBuffer[2 * k]     = outR;
+                    chData.outFftBuffer[2 * k + 1] = outI;
                 }
 
                 fft.performRealOnlyInverseTransform(chData.outFftBuffer.data());
                 window.multiplyWithWindowingTable(chData.outFftBuffer.data(), fftSize);
 
                 for (int i = 0; i < fftSize; ++i) {
-                    chData.olaBuffer[(chData.olaReadPointer + i) % fftSize] += chData.outFftBuffer[i] * 0.5f;
+                    chData.olaBuffer[(chData.olaWritePointer + i) % fftSize] += chData.outFftBuffer[i] * 0.5f;
                 }
+                chData.olaWritePointer = (chData.olaWritePointer + hopSize) % fftSize;
             }
         }
     }
 
-    // MixとGainの処理
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
         if (ch >= 2) { buffer.clear(ch, 0, buffer.getNumSamples()); continue; }
         auto* outData = buffer.getWritePointer(ch);
         auto* dryData = dryBuffer.getReadPointer(ch);
+        
         for (int s = 0; s < buffer.getNumSamples(); ++s) {
             float mixed = (dryData[s] * mixDry) + (outData[s] * mixWet);
-            outData[s] = std::tanh(mixed) * gainLinear;
+            outData[s] = std::tanh(mixed * 0.5f) * gainLinear;
         }
     }
+}
+
+void MyPhaseVocoderAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
+{
+    auto state = apvts.copyState();
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
+}
+
+void MyPhaseVocoderAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+    if (xml && xml->hasTagName(apvts.state.getType()))
+        apvts.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
 juce::AudioProcessorEditor* MyPhaseVocoderAudioProcessor::createEditor() { return new MyPhaseVocoderAudioProcessorEditor(*this); }
