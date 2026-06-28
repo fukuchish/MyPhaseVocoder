@@ -1,7 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-// ==============================================================================
 MyPhaseVocoderAudioProcessor::MyPhaseVocoderAudioProcessor()
     : AudioProcessor(BusesProperties()
           .withInput("Voice (Modulator)", juce::AudioChannelSet::stereo(), true)
@@ -11,6 +10,8 @@ MyPhaseVocoderAudioProcessor::MyPhaseVocoderAudioProcessor()
       fft(fftOrder), 
       window(fftSize, juce::dsp::WindowingFunction<float>::hann)
 {
+    spectrogramData.assign(numBins, 0.0f);
+    drySpectrogramData.assign(numBins, 0.0f); // ★初期化を追加
 }
 
 MyPhaseVocoderAudioProcessor::~MyPhaseVocoderAudioProcessor() {}
@@ -18,14 +19,10 @@ MyPhaseVocoderAudioProcessor::~MyPhaseVocoderAudioProcessor() {}
 juce::AudioProcessorValueTreeState::ParameterLayout MyPhaseVocoderAudioProcessor::createParameters()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
-    
     layout.add(std::make_unique<juce::AudioParameterFloat>("formant", "Formant Shift (st)", -12.0f, 12.0f, 0.0f));
     layout.add(std::make_unique<juce::AudioParameterFloat>("sibilance", "Sibilance (%)", 0.0f, 100.0f, 50.0f));
-    
-    // ★新規追加: シビランスを抽出し始める周波数（Hz）
     layout.add(std::make_unique<juce::AudioParameterFloat>("sibilanceFreq", "Sibilance Freq (Hz)", 2000.0f, 10000.0f, 4000.0f));
-    
-    layout.add(std::make_unique<juce::AudioParameterFloat>("mix", "Mix (%)", 0.0f, 100.0f, 100.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>("mix", "Mix (%)", 0.0f, 100.0f, 50.0f));
     layout.add(std::make_unique<juce::AudioParameterFloat>("gain", "Gain", -60.0f, 12.0f, 0.0f));
     return layout;
 }
@@ -40,8 +37,6 @@ void MyPhaseVocoderAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 {
     juce::ignoreUnused(sampleRate, samplesPerBlock);
     
-    int numBins = fftSize / 2 + 1;
-
     for (auto& ch : channelData)
     {
         ch.modCircularBuffer.assign(fftSize, 0.0f);
@@ -61,6 +56,7 @@ void MyPhaseVocoderAudioProcessor::prepareToPlay(double sampleRate, int samplesP
         ch.olaWritePointer = 0;
     }
     hopCounter = 0;
+    nextFFTBlockReady = false;
 }
 
 void MyPhaseVocoderAudioProcessor::releaseResources() {}
@@ -77,11 +73,8 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     float formantSemitones = apvts.getRawParameterValue("formant")->load();
     float formantRatio = std::pow(2.0f, formantSemitones / 12.0f);
     float sibilanceVal = apvts.getRawParameterValue("sibilance")->load() * 0.01f;
-    
-    // パラメータからシビランスの周波数を取得
     float sibilanceFreq = apvts.getRawParameterValue("sibilanceFreq")->load();
 
-    // ★現在のサンプリングレートから、指定された周波数が「FFTの何番目のビン」に該当するかを計算する
     double currentSampleRate = getSampleRate();
     if (currentSampleRate <= 0.0) currentSampleRate = 44100.0;
     int sibilanceBin = static_cast<int>(sibilanceFreq * fftSize / currentSampleRate);
@@ -92,7 +85,6 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     if (getBusCount(true) > 1) carBus = getBusBuffer(buffer, true, 1);
 
     int numOutChannels = buffer.getNumChannels();
-    int numBins = fftSize / 2 + 1;
 
     juce::AudioBuffer<float> dryBuffer;
     if (modBus.getNumChannels() > 0) {
@@ -148,6 +140,11 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
                     float mR = chData.modFftBuffer[2 * k];
                     float mI = chData.modFftBuffer[2 * k + 1];
                     chData.tempModMag[k] = std::sqrt(mR * mR + mI * mI);
+                    
+                    // ★修正: FFT直後の生のDRY（声）の振幅をUI用に保存
+                    if (ch == 0) {
+                        drySpectrogramData[k] = chData.tempModMag[k];
+                    }
                 }
 
                 for (int k = 0; k < numBins; ++k) {
@@ -169,16 +166,12 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
                     float carMag = std::sqrt(cR * cR + cI * cI);
                     float carPhase = std::atan2(cI, cR);
 
-                    // ★ご指定の通り、固定ゲイン 0.02f にしています
                     float outMag = (chData.shiftedModMag[k] * carMag) * 0.02f;
                     float outR = outMag * std::cos(carPhase);
                     float outI = outMag * std::sin(carPhase);
 
-                    // 【シビランス・エンハンサー】
-                    // 動的に計算された sibilanceBin を超えた帯域から、元の声の高域成分をブレンドする
                     float sibWeight = 0.0f;
                     if (k > sibilanceBin) {
-                        // クロスフェードの幅はビン50個分（約1000Hz）で固定
                         sibWeight = std::min(1.0f, (k - sibilanceBin) / 50.0f) * sibilanceVal;
                     }
                     
@@ -191,6 +184,15 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
 
                     chData.outFftBuffer[2 * k]     = outR;
                     chData.outFftBuffer[2 * k + 1] = outI;
+
+                    // WET（合成後）の振幅をUI用に保存
+                    if (ch == 0) {
+                        spectrogramData[k] = std::sqrt(outR * outR + outI * outI);
+                    }
+                }
+
+                if (ch == 0) {
+                    nextFFTBlockReady = true;
                 }
 
                 fft.performRealOnlyInverseTransform(chData.outFftBuffer.data());
@@ -209,10 +211,8 @@ void MyPhaseVocoderAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
         if (ch >= 2) { buffer.clear(ch, 0, buffer.getNumSamples()); continue; }
         auto* outData = buffer.getWritePointer(ch);
         auto* dryData = dryBuffer.getReadPointer(ch);
-        
         for (int s = 0; s < buffer.getNumSamples(); ++s) {
             float mixed = (dryData[s] * mixDry) + (outData[s] * mixWet);
-            // 固定ゲイン 0.02f 仕様に合わせて tanh をシンプルに適用
             outData[s] = std::tanh(mixed) * gainLinear;
         }
     }

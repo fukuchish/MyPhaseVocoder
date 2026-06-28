@@ -2,8 +2,8 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
-// ==============================================================================
-class MyPhaseVocoderAudioProcessorEditor : public juce::AudioProcessorEditor
+class MyPhaseVocoderAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                           public juce::Timer
 {
 public:
     MyPhaseVocoderAudioProcessorEditor(MyPhaseVocoderAudioProcessor&);
@@ -11,14 +11,15 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    
+    void timerCallback() override;
 
 private:
     MyPhaseVocoderAudioProcessor& audioProcessor;
 
-    // ★ノブが5つになります
     juce::Slider formantSlider;
     juce::Slider sibilanceSlider;
-    juce::Slider sibilanceFreqSlider; // 新規追加
+    juce::Slider sibilanceFreqSlider;
     juce::Slider mixSlider;
     juce::Slider gainSlider;
 
@@ -26,9 +27,12 @@ private:
 
     std::unique_ptr<SliderAttachment> formantAttachment;
     std::unique_ptr<SliderAttachment> sibilanceAttachment;
-    std::unique_ptr<SliderAttachment> sibilanceFreqAttachment; // 新規追加
+    std::unique_ptr<SliderAttachment> sibilanceFreqAttachment;
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<SliderAttachment> gainAttachment;
+
+    // ★修正: 重いImageキャッシュを廃止し、純粋なベクターバウンズのみを定義
+    juce::Rectangle<int> analyzerBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MyPhaseVocoderAudioProcessorEditor)
 };

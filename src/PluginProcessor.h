@@ -2,10 +2,8 @@
 #include <JuceHeader.h>
 #include <vector>
 #include <array>
+#include <atomic>
 
-// ==============================================================================
-// FFT クロスシンセシス・ボコーダー (固定ゲイン0.02f + シビランス周波数可変版)
-// ==============================================================================
 class MyPhaseVocoderAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -36,13 +34,20 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    static constexpr int fftOrder = 11; 
+    static constexpr int fftSize = 1 << fftOrder;     
+    static constexpr int overlap = 4;                 
+    static constexpr int hopSize = fftSize / overlap; 
+    static constexpr int numBins = fftSize / 2 + 1;   
+
+    // ★修正: DRY(元の声)とWET(ボコーダー出力)の両方をUIに送る配列
+    std::vector<float> spectrogramData;    // WET用
+    std::vector<float> drySpectrogramData; // DRY用
+    
+    std::atomic<bool> nextFFTBlockReady { false };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameters();
-
-    static constexpr int fftOrder = 11; 
-    static constexpr int fftSize = 1 << fftOrder;     // 2048 サンプル
-    static constexpr int overlap = 4;                 
-    static constexpr int hopSize = fftSize / overlap; // 512 サンプル
 
     juce::dsp::FFT fft;
     juce::dsp::WindowingFunction<float> window;
