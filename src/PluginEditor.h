@@ -15,9 +15,10 @@ public:
 private:
     MyPhaseVocoderAudioProcessor& audioProcessor;
 
-    // ★新規追加: スライダーを4つに拡張
+    // ★ノブが5つになります
     juce::Slider formantSlider;
     juce::Slider sibilanceSlider;
+    juce::Slider sibilanceFreqSlider; // 新規追加
     juce::Slider mixSlider;
     juce::Slider gainSlider;
 
@@ -25,6 +26,7 @@ private:
 
     std::unique_ptr<SliderAttachment> formantAttachment;
     std::unique_ptr<SliderAttachment> sibilanceAttachment;
+    std::unique_ptr<SliderAttachment> sibilanceFreqAttachment; // 新規追加
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<SliderAttachment> gainAttachment;
 

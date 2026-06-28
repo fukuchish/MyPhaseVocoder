@@ -4,7 +4,7 @@
 #include <array>
 
 // ==============================================================================
-// FFT クロスシンセシス・ボコーダー (フォルマント＆シビランス追加版)
+// FFT クロスシンセシス・ボコーダー (固定ゲイン0.02f + シビランス周波数可変版)
 // ==============================================================================
 class MyPhaseVocoderAudioProcessor : public juce::AudioProcessor
 {
@@ -57,7 +57,6 @@ private:
         
         std::vector<float> olaBuffer;
 
-        // ★新規追加: フォルマント計算用の作業バッファ
         std::vector<float> tempModMag;
         std::vector<float> shiftedModMag;
 
